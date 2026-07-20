@@ -1,0 +1,22 @@
+# This service file is written as a user-level service (run with `systemctl --user ...`)
+# and assumes the following file tree:
+# ~/satcat_mgr/
+#   |--.venv/
+#   |  |-- ...
+#   |--catalog.tle [created by script]
+#   |--satcat_mgr.py
+#   |--secrets.ini
+
+[Unit]
+Description=A script for creating and maintaining a 3LE satellite catalog
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+WorkingDirectory=%h/satcat_mgr
+ExecStart=%h/satcat_mgr/.venv/bin/python satcat_mgr.py ./catalog.tle ./secrets.ini
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

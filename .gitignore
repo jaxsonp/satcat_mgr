@@ -1,0 +1,7 @@
+
+/.venv/
+/venv/
+
+*.log
+*.db
+*.tle
