@@ -14,3 +14,7 @@ password=XYZ
 
 Also included here is an example systemd user service file.
 
+
+--- TODO ---
+
+ * Don't query at peak times, as API docs suggest

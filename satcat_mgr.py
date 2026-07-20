@@ -68,8 +68,8 @@ def spacetrack_login(session: requests.Session, username: str, password: str):
     resp.raise_for_status()
     logger.debug("Authenticated space-track.org session")
 
-def spacetrack_get_gp(session: requests.Session, query_suffix: str) -> list:
-    url = QUERY_GP_URL + query_suffix
+def spacetrack_get_gp(session: requests.Session, days_to_query: float) -> list:
+    url = QUERY_GP_URL + f"/decay_date/null-val/epoch/>now-{days_to_query:.2f}/orderby/NORAD_CAT_ID/format/json"
     logger.debug(f"Querying: {url}")
     response = session.get(url, timeout=QUERY_TIMEOUT_SECS)
 
@@ -210,11 +210,14 @@ def main(catalog_file: Path, secrets_file: Path):
                 );
             """)
 
+            # querying for initial sats to populate db
             with requests.Session() as session:
                 spacetrack_login(session, spacetrack_username, spacetrack_password)
 
                 logger.info("Querying 10 days of GP data (large query)")
-                new_sats = spacetrack_get_gp(session, "/decay_date/null-val/epoch/>now-10/orderby/NORAD_CAT_ID/format/json")
+                new_sats = spacetrack_get_gp(session, 10.0)
+                # update last query time
+                kv_set(db_conn, "last_gp_query_time", str(time.time()))
 
             logger.info(f"Received {len(new_sats)} elsets, inserting into database as a baseline")
             update_sats(db_conn, new_sats)
@@ -236,8 +239,9 @@ def main(catalog_file: Path, secrets_file: Path):
             with requests.Session() as session:
                 spacetrack_login(session, spacetrack_username, spacetrack_password)
 
-                logger.info("Pulling updated elsets")
-                updated_sats = spacetrack_get_gp(session, "/decay_date/null-val/CREATION_DATE/%3Enow-0.042/orderby/NORAD_CAT_ID/format/json")
+                days_to_query = (time.time() - last_query_timestamp) / 86400
+                logger.info(f"Pulling updated elsets (from last {days_to_query:.2f} days)")
+                updated_sats = spacetrack_get_gp(session, days_to_query)
                 # update last query time
                 kv_set(db_conn, "last_gp_query_time", str(time.time()))
 
