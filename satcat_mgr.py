@@ -3,7 +3,7 @@ This script is a service that maintains an updated 3LE satellite catalog,
 periodically querying GP data from space-track.org
 
 Usage:
-    python satcat_mgr.py <catalog_file> <secrets_file>
+    python satcat_mgr.py <out_dir> <secrets_file>
 
 Secrets file should be an INI format file containing a section like:
 
@@ -80,7 +80,7 @@ def spacetrack_get_gp(session: requests.Session, days_to_query: float) -> list:
             logger.debug(f"Rate-limit triggered, waiting for recommended {retry_after} seconds")
             time.sleep(int(retry_after))
         else:
-            logger.debug("Rate-limit triggered, skipping this query")
+            logger.warning("Rate-limit triggered, skipping this query")
             return []
         logger.debug("Retrying query")
         response = session.get(url, timeout=QUERY_TIMEOUT_SECS)
@@ -136,7 +136,7 @@ def update_sats(db_conn: sqlite3.Connection, sats: list):
     # update timestamp
     kv_set(db_conn, "last_updated_timestamp", str(time.time()))
 
-def write_catalog(db_conn: sqlite3.Connection, file_path: Path):
+def write_full_catalog(db_conn: sqlite3.Connection, file_path: Path):
     object_count = 0
     cursor = db_conn.cursor()
     try:
@@ -156,13 +156,23 @@ def write_catalog(db_conn: sqlite3.Connection, file_path: Path):
                     f.write(line + "\n")
     finally:
         cursor.close()
-    logger.info(f"Wrote {object_count} objects to \"{file_path}\"")
+
+def write_individual_3le(db_conn: sqlite3.Connection, dir_path: Path, sat: tuple):
+    """
+    Writes individual 3LEs for a specific object
+
+    Expects a list of tuples: (id, line0, line1, line2)
+    """
+    file_path = dir_path / (sat[0] + ".3le")
+    with open(file_path, "w") as f:
+        for line in sat[1:4]:
+            f.write(line + "\n")
 
 
-def main(catalog_file: Path, secrets_file: Path):
+def main(out_dir: Path, secrets_file: Path):
 
     logger.info("Starting")
-    logger.debug(f"Catalog file: {catalog_file}")
+    logger.debug(f"Output directory: {out_dir}")
     logger.debug(f"Database file: {db_file}")
 
     logger.debug(f"Reading secrets file")
@@ -181,51 +191,40 @@ def main(catalog_file: Path, secrets_file: Path):
         logger.critical("Provided secrets file missing required \"space-track.org\" field: \"password\"")
         sys.exit(1)
 
-    if catalog_file.is_dir():
-        logger.critical("Provided catalog file is a directory: \"{catalog_file}\"")
+    if not out_dir.exists():
+        logger.warning(f"Creating output directory: {out_dir}")
+        out_dir.mkdir(mode=0o755, parents=True)
+    elif not out_dir.is_dir():
+        logger.critical("Provided output path is not a directory: \"{out_dir}\"")
         sys.exit(1)
 
-    db_needs_init = not db_file.exists()
+    full_catalog_path = out_dir / "full_catalog.3le"
+    individual_object_dir_path = out_dir / "by_object"
+    individual_object_dir_path.mkdir(mode=0o755, exist_ok=True)
 
     logger.debug("Creating database connection")
     db_conn = sqlite3.connect(str(db_file))
 
     try:
-        if db_needs_init:
-            logger.info("Initializing satellite database")
+        # ensure tables
+        logger.debug("Ensuring db tables")
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS latest_3les (
+                object_id TEXT PRIMARY KEY,
+                line0 VARCHAR(25) NOT NULL,
+                line1 VARCHAR(70) NOT NULL,
+                line2 VARCHAR(70) NOT NULL
+            );
+        """)
+        db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS kv_store (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
 
-            # ensure tables
-            db_conn.execute("""
-                CREATE TABLE IF NOT EXISTS latest_3les (
-                    object_id TEXT PRIMARY KEY,
-                    line0 VARCHAR(25) NOT NULL,
-                    line1 VARCHAR(70) NOT NULL,
-                    line2 VARCHAR(70) NOT NULL
-                );
-            """)
-            db_conn.execute("""
-                CREATE TABLE IF NOT EXISTS kv_store (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                );
-            """)
-
-            # querying for initial sats to populate db
-            with requests.Session() as session:
-                spacetrack_login(session, spacetrack_username, spacetrack_password)
-
-                logger.info("Querying 10 days of GP data (large query)")
-                new_sats = spacetrack_get_gp(session, 10.0)
-                # update last query time
-                kv_set(db_conn, "last_gp_query_time", str(time.time()))
-
-            logger.info(f"Received {len(new_sats)} elsets, inserting into database as a baseline")
-            update_sats(db_conn, new_sats)
-            logger.info("Database initialized")
-
-        if not catalog_file.exists():
-            logger.info(f"Catalog file \"{catalog_file}\" does not exist, writing now")
-            write_catalog(db_conn, catalog_file)
+        if not full_catalog_path.exists():
+            write_full_catalog(db_conn, full_catalog_path)
 
         while True:
             # check last query time, sleep if necessary
@@ -235,22 +234,26 @@ def main(catalog_file: Path, secrets_file: Path):
                 logger.info(f"Waiting {(secs_to_wait / 60.0):.2f} mins for next query")
                 time.sleep(secs_to_wait)
 
+            # query at most 10 days of data
+            days_to_query = min((time.time() - last_query_timestamp) / 86400, 10.0)
+
             # make query for updated elsets
+            logger.info(f"Pulling updated elsets (from last {days_to_query:.2f} days)")
             with requests.Session() as session:
                 spacetrack_login(session, spacetrack_username, spacetrack_password)
-
-                days_to_query = (time.time() - last_query_timestamp) / 86400
-                logger.info(f"Pulling updated elsets (from last {days_to_query:.2f} days)")
                 updated_sats = spacetrack_get_gp(session, days_to_query)
-                # update last query time
-                kv_set(db_conn, "last_gp_query_time", str(time.time()))
+            # update last query time
+            kv_set(db_conn, "last_gp_query_time", str(time.time()))
 
             if len(updated_sats) > 0:
                 # update db/catalog
-                logger.info(f"Received {len(updated_sats)} updated elsets, updating database and catalog file")
+                logger.info(f"Received {len(updated_sats)} updated elsets, updating database and catalog files")
                 update_sats(db_conn, updated_sats)
                 
-                write_catalog(db_conn, catalog_file)
+                write_full_catalog(db_conn, full_catalog_path)
+                for sat in updated_sats:
+                    write_individual_3le(db_conn, individual_object_dir_path, sat)
+                
             else:
                 logger.info("Received no updated elsets")
     finally:
@@ -262,23 +265,23 @@ if __name__ == "__main__":
         prog=__file__, 
         description="A script for creating and maintaining a 3LE satellite catalog",
     )
-    parser.add_argument("catalog_file", type=str, help="Path of catalog file to create/update")
+    parser.add_argument("out_dir", type=str, help="Path to directory to place 3LEs in")
     parser.add_argument("secrets_file", type=str, help="Path to INI file with credentials/secrets")
 
     args = parser.parse_args()
 
     logger.setLevel(logging.DEBUG)
-    logger_fmt = logging.Formatter("%(asctime)s %(levelname)-8s %(message)s")
     logger_sh = logging.StreamHandler()
-    logger_sh.setFormatter(logger_fmt)
+    logger_sh.setFormatter(logging.Formatter("%(levelname)-8s %(message)s"))
+    logger_sh.setLevel(logging.INFO)
     logger.addHandler(logger_sh)
     logger_fh = RotatingFileHandler(log_file, maxBytes=10000000, backupCount=9)
-    logger_fh.setFormatter(logger_fmt)
+    logger_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(message)s"))
     logger.addHandler(logger_fh)
     logger.debug("Logging initialized")
 
     try:
-        main(Path(args.catalog_file), Path(args.secrets_file))
+        main(Path(args.out_dir), Path(args.secrets_file))
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt")
     except Exception as e:

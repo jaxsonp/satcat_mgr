@@ -1,7 +1,10 @@
 
 /.venv/
 /venv/
+/elsets
 
 *.log
 *.db
 *.tle
+*.3le
+*.ini

@@ -8,15 +8,15 @@
 #   |--secrets.ini
 
 [Unit]
-Description=A script for creating and maintaining a 3LE satellite catalog
-StartLimitIntervalSec=300
+Description=Satellite catalog manager service
+StartLimitIntervalSec=3600
 StartLimitBurst=5
 
 [Service]
 WorkingDirectory=%h/satcat_mgr
-ExecStart=%h/satcat_mgr/.venv/bin/python satcat_mgr.py ./catalog.tle ./secrets.ini
+ExecStart=%h/satcat_mgr/.venv/bin/python satcat_mgr.py ./elsets/ ./secrets.ini
 Restart=always
-RestartSec=30
+RestartSec=300
 
 [Install]
 WantedBy=default.target
